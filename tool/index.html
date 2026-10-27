@@ -44,6 +44,13 @@
   pre.log { background:#0f1720; color:#cfe3f5; padding:13px; border-radius:9px;
             font:12px/1.45 ui-monospace,Consolas,monospace; max-height:300px; overflow:auto; }
   details summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  h3.fh { font-size:14px; margin:18px 0 0; }
+  .ptable-wrap { overflow-x:auto; }
+  .ptable { width:100%; border-collapse:collapse; margin-top:8px; }
+  .ptable th { font-size:12px; color:var(--muted); text-align:left; padding:4px; font-weight:600; }
+  .ptable td { padding:3px; }
+  .ptable input, .ptable select { width:100%; min-width:90px; }
+  .ptable input:disabled { background:#f3f5f7; color:var(--muted); }
   .downloads { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0; }
   .download { background:#eef1f4; color:var(--ink); border:1px solid var(--line); }
   .download .spin { border-color:#c7d3dd; border-top-color:var(--accent); }
@@ -70,10 +77,22 @@
       <span id="userInputStatus" class="msg"></span>
     </div>
     <div class="row" style="margin-top:14px">
-      <input type="file" id="userFile" accept=".xlsx">
+      <input type="file" id="userFile" accept=".xlsx" hidden>
       <button id="btnUpload" class="secondary">Upload Input File</button>
       <span id="uploadMsg" class="msg"></span>
     </div>
+    <details id="inputFormBox" style="margin-top:14px">
+      <summary>Or enter input data in a form instead of uploading a file</summary>
+      <p class="msg">One input is active at a time: saving the form replaces the uploaded workbook,
+        and uploading a file replaces the form values. Own profiles need a file upload.</p>
+      <div id="formIssues" class="msg warn" hidden></div>
+      <div id="inputFormBody"></div>
+      <div class="row" style="margin-top:14px">
+        <button id="btnSaveForm">Save form data</button>
+        <span id="formState" class="msg"></span>
+      </div>
+      <div id="formMsg" class="msg"></div>
+    </details>
     <div class="row" style="margin-top:12px">
       <button id="btnCleanup" class="secondary">Clean up old files</button>
       <span id="cleanupMsg" class="msg"></span>
@@ -497,16 +516,303 @@ $("#btnCleanup").onclick = async () => {
   }
 };
 
-$("#btnUpload").onclick = async () => {
-  const file = $("#userFile").files[0];
-  const message = $("#uploadMsg");
-  if (!file) {
-    message.className = "msg err";
-    message.textContent = "Pick .xlsx file first.";
-    return;
+// ---- Input form (second way to provide the input workbook) ----
+const AREA_TYPES = ["Urban", "Suburban", "Rural"];
+const TRAJECTORIES = ["Instantaneous", "Linear", "Exponential"];
+const HORIZONS = [5, 10, 12, 15, 18, 20];
+const GREEN_TARIFF = "Green Tariff";  // Ukrainian export (To Grid) only
+const PARTICIPANT_LIMIT = 50;
+let formData = null;
+let formOptions = null;
+let formDirty = false;
+
+const countryTariffs = () => (formOptions.tariffs[formData.country] || []);
+const choice = (key, label, choices, extra = {}) => ({key, label, kind:"choice", choices, ...extra});
+const num = (key, label, extra = {}) => ({key, label, kind:"number", ...extra});
+
+function resetDependentGeography() {
+  const cities = formOptions.cities[formData.country] || [];
+  if (!cities.includes(formData.city)) formData.city = cities[0] || null;
+  if (!countryTariffs().includes(formData.tariff_to)) formData.tariff_to = "Fixed";
+  if (!countryTariffs().includes(formData.tariff_from)) formData.tariff_from = "Fixed";
+}
+
+const FORM_SECTIONS = [
+  {title: "Geography and tariffs", fields: () => [
+    choice("country", "Country", () => Object.keys(formOptions.cities), {onChange: resetDependentGeography}),
+    choice("city", "City", () => formOptions.cities[formData.country] || []),
+    choice("area_type", "Area type", () => AREA_TYPES),
+    choice("tariff_from", "From Grid tariff", () => countryTariffs().filter(t => t !== GREEN_TARIFF)),
+    choice("tariff_to", "To Grid tariff", () => countryTariffs()),
+    num("tariff_from_own", "From Grid own fixed tariff, €/kWh", {min: 0, optional: true}),
+    num("tariff_to_own", "To Grid own fixed tariff, €/kWh", {min: 0})
+  ]},
+  {title: "PV", fields: () => [
+    num("pv_existing_kw", "Existing PV power, kW", {min: 0}),
+    num("pv_projected_kw", "Projected PV power, kW", {min: 0}),
+    choice("pv_profile", "PV profile",
+      () => formOptions.profiles["PV Profile"].filter(p => p.startsWith("Database"))),
+    num("pv_age_years", "Age of existing PV, years", {min: 0, max: 25}),
+    num("pv_degradation_pct", "PV degradation, %", {min: 0.1, max: 2}),
+    choice("pv_trajectory", "PV adoption trajectory", () => TRAJECTORIES)
+  ]},
+  {title: "EV", fields: () => [
+    num("ev_existing", "Existing EV number", {min: 0, step: 1}),
+    num("ev_projected", "Projected EV number", {min: 0, step: 1}),
+    choice("ev_trajectory", "EV adoption trajectory", () => TRAJECTORIES),
+    num("ev_home_pct", "EV home charging, %", {min: 0, max: 100}),
+    num("ev_public_pct", "EV public charging, %", {min: 0, max: 100}),
+    num("ev_workplace_pct", "EV workplace charging, %", {min: 0, max: 100}),
+    num("ev_fast_pct", "EV fast charging, % (the four shares sum to 100)", {min: 0, max: 100}),
+    num("smart_charging_pct", "Smart charging participation, %", {min: 0, max: 100})
+  ]},
+  {title: "BESS and model settings", fields: () => [
+    num("bess_existing_kwh", "Existing BESS capacity, kWh", {min: 0}),
+    num("bess_projected_kwh", "Projected BESS capacity, kWh", {min: 0}),
+    num("bess_degradation_pct", "BESS degradation, %", {min: 0.1, max: 2}),
+    choice("horizon_years", "Planning horizon, years", () => HORIZONS, {numeric: true}),
+    num("load_growth_pct", "Annual load growth, % (blank = 0)", {min: 0.01, max: 100, optional: true})
+  ]}
+];
+
+function markFormDirty() {
+  formDirty = true;
+  const state = $("#formState");
+  state.className = "msg warn";
+  state.textContent = "Unsaved changes: save before running the analysis.";
+  $("#formMsg").textContent = "";
+}
+
+function markFormClean() {
+  formDirty = false;
+  $("#formState").textContent = "";
+}
+
+function fieldElement(spec) {
+  const wrap = document.createElement("div");
+  wrap.className = "fld";
+  const label = document.createElement("label");
+  label.textContent = spec.label;
+  let input;
+  if (spec.kind === "choice") {
+    input = document.createElement("select");
+    const choices = spec.choices().slice();
+    // Keep an unsupported current value (e.g. an imported Own profile) visible; the server rejects it on save.
+    const current = formData[spec.key];
+    if (current !== null && current !== undefined && !choices.includes(current)) choices.push(current);
+    for (const item of choices) {
+      const option = document.createElement("option");
+      option.value = String(item);
+      option.textContent = String(item);
+      input.append(option);
+    }
+    input.value = String(current);
+    input.onchange = () => {
+      formData[spec.key] = spec.numeric ? Number(input.value) : input.value;
+      if (spec.onChange) spec.onChange();
+      markFormDirty();
+      renderInputForm();
+    };
+  } else {
+    input = document.createElement("input");
+    input.type = "number";
+    input.step = spec.step || "any";
+    if (spec.min !== undefined) input.min = spec.min;
+    if (spec.max !== undefined) input.max = spec.max;
+    input.value = formData[spec.key] ?? "";
+    input.oninput = () => {
+      formData[spec.key] = input.value === "" ? null : Number(input.value);
+      markFormDirty();
+    };
   }
+  wrap.append(label, input);
+  return wrap;
+}
+
+function participantRow(item, index) {
+  const row = document.createElement("tr");
+  const cell = child => {
+    const td = document.createElement("td");
+    td.append(child);
+    row.append(td);
+    return td;
+  };
+  const id = document.createElement("span");
+  id.textContent = String(index + 1);
+  cell(id);
+
+  const select = (values, current, onChange) => {
+    const el = document.createElement("select");
+    const list = values.slice();
+    if (current && !list.includes(current)) list.push(current);
+    for (const value of list) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      el.append(option);
+    }
+    el.value = current ?? "";
+    el.onchange = () => { onChange(el.value); markFormDirty(); renderInputForm(); };
+    return el;
+  };
+  const numberInput = (key, extra) => {
+    const el = document.createElement("input");
+    el.type = "number";
+    el.step = extra.step || "any";
+    el.min = 0;
+    if (extra.placeholder) el.placeholder = extra.placeholder;
+    el.value = item[key] ?? "";
+    el.oninput = () => { item[key] = el.value === "" ? null : Number(el.value); markFormDirty(); };
+    return el;
+  };
+
+  const types = formOptions.participant_types;
+  cell(select(Object.keys(types), item.category, value => {
+    item.category = value;
+    item.type = (types[value] || [])[0] || null;
+  }));
+  cell(select(types[item.category] || [], item.type, value => { item.type = value; }));
+  cell(numberInput("number", {step: 1, placeholder: "1"}));
+  cell(numberInput("annual_kwh", {placeholder: "blank = use profile"}));
+  const profile = document.createElement("input");
+  profile.type = "text";
+  profile.disabled = true;
+  profile.value = item.load_profile ?? "";
+  cell(profile);
+  const comment = document.createElement("input");
+  comment.type = "text";
+  comment.value = item.comment ?? "";
+  comment.oninput = () => { item.comment = comment.value === "" ? null : comment.value; markFormDirty(); };
+  cell(comment);
+  const remove = document.createElement("button");
+  remove.className = "secondary";
+  remove.textContent = "×";
+  remove.title = "Remove participant";
+  remove.onclick = () => {
+    formData.participants.splice(index, 1);
+    markFormDirty();
+    renderInputForm();
+  };
+  cell(remove);
+  return row;
+}
+
+function renderInputForm() {
+  const body = $("#inputFormBody");
+  body.innerHTML = "";
+  if (!formData) return;
+  for (const section of FORM_SECTIONS) {
+    const title = document.createElement("h3");
+    title.className = "fh";
+    title.textContent = section.title;
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    section.fields().forEach(spec => grid.append(fieldElement(spec)));
+    body.append(title, grid);
+  }
+
+  const title = document.createElement("h3");
+  title.className = "fh";
+  title.textContent = `Participants (${formData.participants.length} of ${PARTICIPANT_LIMIT})`;
+  const wrap = document.createElement("div");
+  wrap.className = "ptable-wrap";
+  const table = document.createElement("table");
+  table.className = "ptable";
+  const head = document.createElement("tr");
+  ["#", "Category", "Type", "Number", "Annual consumption, kWh", "Load profile", "Comment", ""].forEach(text => {
+    const th = document.createElement("th");
+    th.textContent = text;
+    head.append(th);
+  });
+  table.append(head);
+  formData.participants.forEach((item, index) => table.append(participantRow(item, index)));
+  wrap.append(table);
+  const add = document.createElement("button");
+  add.className = "secondary";
+  add.style.marginTop = "8px";
+  add.textContent = "Add participant";
+  add.disabled = formData.participants.length >= PARTICIPANT_LIMIT;
+  add.onclick = () => {
+    const category = Object.keys(formOptions.participant_types)[0];
+    formData.participants.push({
+      category, type: formOptions.participant_types[category][0], number: 1,
+      annual_kwh: null, load_profile: "Database", comment: null
+    });
+    markFormDirty();
+    renderInputForm();
+  };
+  body.append(title, wrap, add);
+}
+
+function applyInputForm(payload) {
+  formData = payload.form;
+  formOptions = payload.options;
+  const issues = $("#formIssues");
+  issues.hidden = !payload.issues.length;
+  issues.textContent = payload.issues.length
+    ? `Current input cannot be saved from the form as it is:\n${payload.issues.join("\n")}`
+    : "";
+  markFormClean();
+  renderInputForm();
+}
+
+async function loadInputForm() {
+  try {
+    const response = await fetch("/api/input-form");
+    const body = await response.json();
+    if (!response.ok) throw new Error(apiError(response, body));
+    applyInputForm(body);
+  } catch (error) {
+    $("#formMsg").className = "msg err";
+    $("#formMsg").textContent = `Could not load form: ${error.message}`;
+  }
+}
+
+$("#btnSaveForm").onclick = async () => {
+  if (!formData) return;
+  const button = $("#btnSaveForm");
+  const message = $("#formMsg");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/input-form", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(formData)
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(apiError(response, body));
+    applyInputForm(body);
+    message.className = "msg ok";
+    message.textContent = "Form data saved as the active input.";
+    $("#uploadMsg").textContent = "";
+    $("#userInputStatus").className = "msg ok";
+    $("#userInputStatus").textContent = "Input workbook ready (from form)";
+    resultsView += 1;
+    artifactsMode = null;
+    $("#resultsCard").hidden = true;
+    reportFrame.hidden = true;
+  } catch (error) {
+    message.className = "msg err";
+    message.textContent = `Save failed:\n${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+};
+
+$("#btnUpload").onclick = () => {
+  if (formDirty && !confirm("Discard unsaved form changes and upload a file?")) return;
+  $("#userFile").click();
+};
+
+$("#userFile").onchange = async event => {
+  const input = event.target;
+  const file = input.files[0];
+  const message = $("#uploadMsg");
+  if (!file) return;
   const form = new FormData();
   form.append("file", file);
+  const button = $("#btnUpload");
+  button.disabled = true;
   try {
     const response = await fetch("/api/upload", {method:"POST", body:form});
     const body = await response.json();
@@ -519,15 +825,26 @@ $("#btnUpload").onclick = async () => {
     artifactsMode = null;
     $("#resultsCard").hidden = true;
     reportFrame.hidden = true;
+    $("#formMsg").textContent = "";
+    await loadInputForm();
   } catch (error) {
     message.className = "msg err";
     message.textContent = `Upload failed: ${error.message}`;
+  } finally {
+    input.value = "";
+    button.disabled = false;
   }
 };
 
 $("#btnAnalyze").onclick = async () => {
   const button = $("#btnAnalyze");
   const state = $("#runState");
+  if (formDirty) {
+    state.className = "msg err";
+    state.textContent = "Unsaved form changes: click \"Save form data\" first.";
+    $("#inputFormBox").open = true;
+    return;
+  }
   button.disabled = true;
   state.className = "msg";
   const runMode = modeSelect.value;
@@ -566,6 +883,7 @@ $("#btnAnalyze").onclick = async () => {
   }
 };
 
+loadInputForm();
 loadSchema().catch(error => {
   $("#runState").className = "msg err";
   $("#runState").textContent = `Failed to load application state: ${error.message}`;

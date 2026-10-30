@@ -55,19 +55,10 @@ if errorlevel 1 (
 rem Pinned dependencies (numpy 2.5+) need Python 3.12+. Fail early with the
 rem real version instead of a confusing pip "No matching distribution" error.
 set "PY_VER="
-for /f "tokens=1,2" %%A in ('"%VENV_PY%" -V 2^>^&1') do if /i "%%A"=="Python" set "PY_VER=%%B"
-if not defined PY_VER (
-    echo ERROR: Cannot run the Python interpreter in .venv ^(%VENV_PY%^).
-    echo Delete the .venv folder next to Start.bat and run Start.bat again.
-    goto :fail
-)
+for /f "tokens=1,2" %%A in ('"%VENV_PY%" -V 2^>^&1') do if /i "%%A"=="Python" echo %%B| findstr /r /c:"^[0-9][0-9]*\.[0-9][0-9]*" >nul && set "PY_VER=%%B"
+if not defined PY_VER goto :venv_broken
 "%VENV_PY%" -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, 12) else 1)" >nul 2>nul
-if errorlevel 1 (
-    echo ERROR: Python 3.12+ is required, found %PY_VER%.
-    echo Install Python 3.12+ from https://www.python.org/downloads/windows/
-    echo Then delete the .venv folder next to Start.bat and run Start.bat again.
-    goto :fail
-)
+if errorlevel 1 goto :venv_old
 
 echo Installing or updating dependencies...
 "%VENV_PY%" -m pip install --disable-pip-version-check -r requirements.txt
@@ -125,6 +116,18 @@ echo.
 pause
 endlocal
 exit /b 1
+
+:venv_broken
+rem Labels, not an if-block: %VENV_PY% may contain ")" (e.g. Program Files (x86)).
+echo ERROR: Cannot run the Python interpreter in .venv (%VENV_PY%).
+echo Delete the .venv folder next to Start.bat and run Start.bat again.
+goto :fail
+
+:venv_old
+echo ERROR: Python 3.12+ is required, found %PY_VER%.
+echo Install Python 3.12+ from https://www.python.org/downloads/windows/
+echo Then delete the .venv folder next to Start.bat and run Start.bat again.
+goto :fail
 
 :find_python
 rem Set PY_CMD to a real Python launch command, or leave it undefined.

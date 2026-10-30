@@ -55,7 +55,12 @@ if errorlevel 1 (
 rem Pinned dependencies (numpy 2.5+) need Python 3.12+. Fail early with the
 rem real version instead of a confusing pip "No matching distribution" error.
 set "PY_VER="
-for /f "tokens=2" %%V in ('"%VENV_PY%" -V 2^>^&1') do set "PY_VER=%%V"
+for /f "tokens=1,2" %%A in ('"%VENV_PY%" -V 2^>^&1') do if /i "%%A"=="Python" set "PY_VER=%%B"
+if not defined PY_VER (
+    echo ERROR: Cannot run the Python interpreter in .venv ^(%VENV_PY%^).
+    echo Delete the .venv folder next to Start.bat and run Start.bat again.
+    goto :fail
+)
 "%VENV_PY%" -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, 12) else 1)" >nul 2>nul
 if errorlevel 1 (
     echo ERROR: Python 3.12+ is required, found %PY_VER%.

@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions DisableDelayedExpansion
 
 rem Always run from repository root, even when launched by double-click.
 cd /d "%~dp0"
@@ -28,7 +28,7 @@ if defined LISTENER_PID (
 )
 
 if not exist "requirements.txt" (
-    echo ERROR: requirements.txt not found in %CD%
+    echo ERROR: requirements.txt not found in "%CD%"
     goto :fail
 )
 
@@ -52,13 +52,11 @@ if errorlevel 1 (
 
 :venv_ready
 
-rem Pinned dependencies (numpy 2.5+) need Python 3.12+. Fail early with the
-rem real version instead of a confusing pip "No matching distribution" error.
-set "PY_VER="
-for /f "tokens=1,2" %%A in ('"%VENV_PY%" -V 2^>^&1') do if /i "%%A"=="Python" echo %%B| findstr /r /c:"^[0-9][0-9]*\.[0-9][0-9]*" >nul && set "PY_VER=%%B"
-if not defined PY_VER goto :venv_broken
-"%VENV_PY%" -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, 12) else 1)" >nul 2>nul
-if errorlevel 1 goto :venv_old
+rem Run the quoted interpreter directly: FOR /F would reparse special path characters.
+rem Exit 12 means Python ran but is too old; any other failure means a broken venv.
+"%VENV_PY%" -c "import sys; old = sys.version_info[:2] < (3, 12); print('ERROR: Python 3.12+ is required, found ' + sys.version.split()[0] + '.') if old else None; sys.exit(12 if old else 0)"
+if "%ERRORLEVEL%"=="12" goto :venv_old
+if not "%ERRORLEVEL%"=="0" goto :venv_broken
 
 echo Installing or updating dependencies...
 "%VENV_PY%" -m pip install --disable-pip-version-check -r requirements.txt
@@ -118,13 +116,11 @@ endlocal
 exit /b 1
 
 :venv_broken
-rem Labels, not an if-block: %VENV_PY% may contain ")" (e.g. Program Files (x86)).
-echo ERROR: Cannot run the Python interpreter in .venv (%VENV_PY%).
+echo ERROR: Cannot run the Python interpreter in .venv: "%VENV_PY%".
 echo Delete the .venv folder next to Start.bat and run Start.bat again.
 goto :fail
 
 :venv_old
-echo ERROR: Python 3.12+ is required, found %PY_VER%.
 echo Install Python 3.12+ from https://www.python.org/downloads/windows/
 echo Then delete the .venv folder next to Start.bat and run Start.bat again.
 goto :fail
